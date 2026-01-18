@@ -438,17 +438,23 @@ class DataLoader:
         try:
             logger.log(f"Loading data to SQL table: {table_name}")
             
-            # Get row count before insertion
+            # Get row count before insertion (handle case where table doesn't exist)
             cursor = sql_connection.cursor()
-            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-            old_count = cursor.fetchone()[0] if cursor.fetchone() else 0
+            try:
+                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                result = cursor.fetchone()
+                old_count = result[0] if result else 0
+            except sqlite3.OperationalError:
+                # Table doesn't exist yet, that's fine
+                old_count = 0
             
             # Load data
             df.to_sql(table_name, sql_connection, if_exists='replace', index=False)
             
             # Verify insertion
             cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-            new_count = cursor.fetchone()[0]
+            result = cursor.fetchone()
+            new_count = result[0] if result else 0
             
             logger.log(f"✓ Data loaded successfully to database")
             logger.log(f"  Table: {table_name}")
@@ -857,34 +863,53 @@ def run_etl_pipeline():
             logger.log("WARNING: CSV loading failed, continuing with database load...", 'WARNING')
         
         # Phase 4: Load to Database
-        with DataLoader.database_connection(Config.DATABASE_NAME) as conn:
-            if not DataLoader.load_to_db(df_transformed, conn, Config.TABLE_NAME):
-                logger.log("ETL PROCESS ABORTED: Database loading failed", 'ERROR')
-                return False
-            
-            # Phase 5: Verification Queries
-            logger.log("")
-            logger.log("=" * 60)
-            logger.log("PHASE 5: VERIFICATION QUERIES")
-            logger.log("=" * 60)
-            
-            query_executor = QueryExecutor(conn)
-            for query_info in VERIFICATION_QUERIES:
-                query_executor.display_query_results(
-                    query_info["query"], 
-                    query_info["description"]
-                )
+        db_success = False
+        try:
+            with DataLoader.database_connection(Config.DATABASE_NAME) as conn:
+                db_success = DataLoader.load_to_db(df_transformed, conn, Config.TABLE_NAME)
+                
+                if db_success:
+                    # Phase 5: Verification Queries
+                    logger.log("")
+                    logger.log("=" * 60)
+                    logger.log("PHASE 5: VERIFICATION QUERIES")
+                    logger.log("=" * 60)
+                    
+                    query_executor = QueryExecutor(conn)
+                    for query_info in VERIFICATION_QUERIES:
+                        query_executor.display_query_results(
+                            query_info["query"], 
+                            query_info["description"]
+                        )
+                else:
+                    logger.log("WARNING: Database loading failed, but continuing with visualizations...", 'WARNING')
+        except Exception as e:
+            logger.log(f"WARNING: Database operation failed: {str(e)}", 'WARNING')
+            logger.log("Continuing with visualizations...")
         
-        # Phase 6: Data Visualization
+        # Phase 6: Data Visualization (always attempt, even if previous phases had issues)
+        logger.log("")
+        logger.log("=" * 60)
+        logger.log("PHASE 6: DATA VISUALIZATION")
+        logger.log("=" * 60)
+        
         if VISUALIZATION_AVAILABLE:
-            visualizer = DataVisualizer()
-            visualizer.create_all_visualizations(df_transformed)
+            try:
+                visualizer = DataVisualizer()
+                if visualizer.create_all_visualizations(df_transformed):
+                    logger.log("")
+                    logger.log("✓ Visualizations created successfully!")
+                    logger.log(f"  Check the 'visualizations/' folder for the charts")
+                else:
+                    logger.log("WARNING: Visualization creation returned False", 'WARNING')
+            except Exception as e:
+                logger.log(f"ERROR: Visualization generation failed: {str(e)}", 'ERROR')
+                import traceback
+                logger.log(traceback.format_exc(), 'DEBUG')
         else:
-            logger.log("")
-            logger.log("=" * 60)
-            logger.log("PHASE 6: DATA VISUALIZATION")
-            logger.log("=" * 60)
-            logger.log("WARNING: Visualization libraries not available. Install matplotlib and seaborn to enable.")
+            logger.log("WARNING: Visualization libraries not available.")
+            logger.log("To enable visualizations, run: ./install_visualizations.sh")
+            logger.log("Or manually: pip install matplotlib seaborn")
         
         # Calculate execution time
         end_time = datetime.now()
